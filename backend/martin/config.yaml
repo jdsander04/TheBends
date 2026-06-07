@@ -1,0 +1,16 @@
+listen_addresses: "0.0.0.0:3000"
+
+tables:
+  osm_roads:
+    schema: public
+    table: osm_roads
+    id_column: id
+    geometry_column: geom
+    srid: 4326
+    geometry_type: LINESTRING
+    minzoom: 6
+    maxzoom: 16
+    properties:
+      name: text
+      highway: text
+      twistiness_score: double

@@ -1,0 +1,25 @@
+# OSM extracts, SRTM tiles, and other large pipeline data (never commit)
+backend/data/*
+!backend/data/.gitkeep
+
+# Python (backend api + pipeline)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Flutter / build output
+build/
+
+# OS / editor
+.DS_Store
+*.swp

@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: thebends
+      POSTGRES_USER: thebends
+      POSTGRES_PASSWORD: thebends
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:z
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U thebends"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./api
+    environment:
+      DATABASE_URL: postgresql://thebends:thebends@db:5432/thebends
+    volumes:
+      - ./api/app:/app/app:z
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  tiles:
+    image: ghcr.io/maplibre/martin:latest
+    environment:
+      DATABASE_URL: postgresql://thebends:thebends@db:5432/thebends
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: on-failure
+
+  pipeline:
+    build:
+      context: ./pipeline
+    environment:
+      DATABASE_URL: postgresql://thebends:thebends@db:5432/thebends
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data:z
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles:
+      - pipeline
+
+volumes:
+  pgdata:
