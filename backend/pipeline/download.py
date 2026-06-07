@@ -2,13 +2,26 @@ from pathlib import Path
 
 import httpx
 
-_GEOFABRIK = "https://download.geofabrik.de/north-america/us"
+_NA = "https://download.geofabrik.de/north-america"
+_US = f"{_NA}/us"
 
-REGIONS = {
-    "pennsylvania": f"{_GEOFABRIK}/pennsylvania-latest.osm.pbf",
-    "new-york":     f"{_GEOFABRIK}/new-york-latest.osm.pbf",
-    "tennessee":    f"{_GEOFABRIK}/tennessee-latest.osm.pbf",
-}
+# Geofabrik per-state extract slugs (50 states + DC).
+US_STATES = [
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "district-of-columbia", "florida", "georgia",
+    "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky",
+    "louisiana", "maine", "maryland", "massachusetts", "michigan", "minnesota",
+    "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new-hampshire", "new-jersey", "new-mexico", "new-york", "north-carolina",
+    "north-dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
+    "rhode-island", "south-carolina", "south-dakota", "tennessee", "texas",
+    "utah", "vermont", "virginia", "washington", "west-virginia", "wisconsin",
+    "wyoming",
+]
+
+# Each state -> its Geofabrik extract, plus a single whole-country extract.
+REGIONS = {state: f"{_US}/{state}-latest.osm.pbf" for state in US_STATES}
+REGIONS["united-states"] = f"{_NA}/us-latest.osm.pbf"
 
 
 def download_region(region: str, data_dir: Path) -> Path:
