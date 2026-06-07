@@ -1,0 +1,16 @@
+# Serves the Flutter web build and reverse-proxies the API + tiles on the same
+# origin, so the web app needs no CORS. cloudflared points one hostname here
+# (route example.com -> http://web:80). Local test: http://localhost:8080
+:80 {
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+	handle /tiles/* {
+		reverse_proxy tiles:3000
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html   # SPA fallback for Flutter web routing
+		file_server
+	}
+}

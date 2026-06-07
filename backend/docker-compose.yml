@@ -54,12 +54,32 @@ services:
     profiles:
       - pipeline
 
-  # Cloudflare Tunnel: exposes the API/tiles over HTTPS with no open ports.
-  # Token-based connector — create the tunnel + public-hostname routes in the
-  # Cloudflare Zero Trust dashboard (route e.g. api.example.com -> http://api:8000
-  # and tiles.example.com -> http://tiles:3000; cloudflared resolves those
-  # service names over this compose network). Put the token in backend/.env as
-  # CLOUDFLARE_TUNNEL_TOKEN. Start with:  docker-compose --profile tunnel up -d
+  # Static host for the Flutter web build + same-origin reverse proxy to the
+  # API/tiles (so the web app needs no CORS). Build the web app first:
+  #   cd ../frontend && flutter build web --dart-define=API_BASE=https://<host>
+  # then:  docker-compose --profile web up -d   (local test at :8080)
+  web:
+    image: caddy:2-alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:z,ro
+      - ../frontend/build/web:/srv:z,ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+      - tiles
+    restart: unless-stopped
+    profiles:
+      - web
+
+  # Cloudflare Tunnel: exposes everything over HTTPS with no open ports.
+  # Token-based connector — create the tunnel + a public-hostname route in the
+  # Cloudflare Zero Trust dashboard. Recommended (all-in-one via Caddy):
+  #   example.com -> http://web:80   (serves the web app + proxies /api and /tiles)
+  # Or route API/tiles directly: api.example.com -> http://api:8000, etc.
+  # cloudflared resolves these service names over this compose network. Put the
+  # token in backend/.env as CLOUDFLARE_TUNNEL_TOKEN.
+  # Start everything:  docker-compose --profile web --profile tunnel up -d
   cloudflared:
     image: cloudflare/cloudflared:latest
     command: tunnel --no-autoupdate run
