@@ -61,11 +61,22 @@ def main():
     print("Recreating osm_roads table ...")
     recreate_table(conn)
 
+    failed = []
     for i, region in enumerate(regions):
         print(f"\n[{i+1}/{len(regions)}] {region}")
-        pbf = download_region(region, DATA_DIR)
-        print(f"  Streaming {pbf.name} (with surface + elevation) ...")
-        insert_raw(parse_pbf(str(pbf), elev), conn)
+        try:
+            pbf = download_region(region, DATA_DIR)
+            print(f"  Streaming {pbf.name} (with surface + elevation) ...")
+            insert_raw(parse_pbf(str(pbf), elev), conn)
+        except Exception as exc:
+            # One corrupt download or parse error shouldn't kill a 51-state run.
+            print(f"  !! FAILED {region}: {exc}")
+            conn.rollback()
+            failed.append(region)
+
+    if failed:
+        print(f"\nSkipped {len(failed)} region(s): {', '.join(failed)}")
+        print("  (delete their .pbf in /data and re-run to retry)")
 
     print("\nPruning dense-grid (subdivision) residential segments ...")
     removed = prune_urban_residential(conn)

@@ -27,15 +27,19 @@ REGIONS["united-states"] = f"{_NA}/us-latest.osm.pbf"
 def download_region(region: str, data_dir: Path) -> Path:
     url = REGIONS[region]
     dest = data_dir / f"{region}-latest.osm.pbf"
-    if dest.exists():
+    if dest.exists() and dest.stat().st_size > 0:
         print(f"  {dest.name} already cached, skipping download")
         return dest
     data_dir.mkdir(parents=True, exist_ok=True)
+    # Download to a .part file and rename on success, so an interrupted
+    # download never gets left behind looking like a valid cached file.
+    tmp = dest.with_name(dest.name + ".part")
     print(f"  Downloading {url} ...")
     with httpx.stream("GET", url, follow_redirects=True, timeout=600) as r:
         r.raise_for_status()
-        with open(dest, "wb") as f:
+        with open(tmp, "wb") as f:
             for chunk in r.iter_bytes(chunk_size=65_536):
                 f.write(chunk)
+    tmp.rename(dest)
     print(f"  Saved {dest} ({dest.stat().st_size / 1_048_576:.0f} MB)")
     return dest
