@@ -2,10 +2,15 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from .routers import roads, routes
 
 app = FastAPI(title="TheBends API", version="0.1.0")
+
+# GeoJSON is highly compressible (~8-10x); the map payloads are the bulk of our
+# traffic, so compress anything non-trivial.
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 # CORS so the Flutter *web* build can call the API from another origin
 # (e.g. Cloudflare Pages). Same-origin deploys behind Caddy don't need it, but

@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_map/flutter_map.dart';
@@ -10,6 +12,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
 import '../config/api.dart';
+import '../config/basemaps.dart';
 import '../models/road.dart';
 import '../services/api_service.dart';
 import '../widgets/filter_slider.dart';
@@ -23,6 +26,7 @@ const _kPinHitRadiusM = 60.0; // tapping within this of a pin selects it
 
 final filterProvider = StateProvider<double>((ref) => 0.3);
 final pavedOnlyProvider = StateProvider<bool>((ref) => true);
+final basemapProvider = StateProvider<int>((ref) => 0); // index into kBasemaps
 
 // Used by RoadDetailSheet for the overall road color chip
 Color twistinessColor(double score) {
@@ -32,23 +36,29 @@ Color twistinessColor(double score) {
   return const Color(0xFFFFB300);
 }
 
-// Per-segment color based on local turn angle at that point
-Color _curveColor(double angleDeg) {
-  if (angleDeg < 3)  return const Color(0xFF7A5C00); // dim — straight section
-  if (angleDeg < 10) return const Color(0xFFFFB300);  // amber — gentle
-  if (angleDeg < 20) return const Color(0xFFFF6B00);  // orange — moderate
-  if (angleDeg < 35) return const Color(0xFFFF2222);  // crimson — good curve
-  return const Color(0xFFFF0090);                      // magenta — tight!
+// Curve severity bucket (0=straight … 4=hairpin) from the local turn angle.
+// Both color and width derive from this, so segments in the same bucket render
+// identically and can share a single Polyline.
+int _curveBucket(double angleDeg) {
+  if (angleDeg < 3)  return 0; // straight section
+  if (angleDeg < 10) return 1; // gentle
+  if (angleDeg < 20) return 2; // moderate
+  if (angleDeg < 35) return 3; // good curve
+  return 4;                     // tight!
 }
 
-double _curveWidth(double angleDeg, double roadScore) {
-  final base = 2.5 + roadScore * 2.0;
-  if (angleDeg < 3)  return base * 0.5;
-  if (angleDeg < 10) return base;
-  if (angleDeg < 20) return base * 1.3;
-  if (angleDeg < 35) return base * 1.6;
-  return base * 2.0;
-}
+const _bucketColors = <Color>[
+  Color(0xFF7A5C00), // 0 dim — straight
+  Color(0xFFFFB300), // 1 amber — gentle
+  Color(0xFFFF6B00), // 2 orange — moderate
+  Color(0xFFFF2222), // 3 crimson — good curve
+  Color(0xFFFF0090), // 4 magenta — tight
+];
+
+const _bucketWidthMul = <double>[0.5, 1.0, 1.3, 1.6, 2.0];
+
+double _bucketWidth(int bucket, double roadScore) =>
+    (2.5 + roadScore * 2.0) * _bucketWidthMul[bucket];
 
 // Equirectangular bearing-change angle at node b, given neighbors a and c
 double _angleDeg(LatLng a, LatLng b, LatLng c) {
@@ -70,8 +80,9 @@ double _angleDeg(LatLng a, LatLng b, LatLng c) {
   return math.acos(cosA) * 180.0 / math.pi;
 }
 
-// Split each road into per-segment Polylines colored by local curve angle.
-// Computed once when roads arrive, not on every frame.
+// Split each road into curve-colored Polylines. Consecutive segments of the
+// same severity bucket are merged into one Polyline, so a 200-node road yields
+// a handful of objects instead of ~200. Computed once when roads arrive.
 List<Polyline> _buildPolylines(List<Road> roads) {
   final result = <Polyline>[];
   for (final road in roads) {
@@ -86,17 +97,66 @@ List<Polyline> _buildPolylines(List<Road> roads) {
     angles[0] = pts.length > 2 ? angles[1] : 0.0;
     angles[pts.length - 1] = pts.length > 2 ? angles[pts.length - 2] : 0.0;
 
-    for (int i = 0; i < pts.length - 1; i++) {
-      final angle = (angles[i] + angles[i + 1]) / 2.0;
+    // Segment s connects pts[s]..pts[s+1]; its bucket is the mean of the two
+    // node angles. Merge a run of same-bucket segments [runStart, s-1] into a
+    // single polyline spanning pts[runStart..s].
+    final nSeg = pts.length - 1;
+    int bucketAt(int s) => _curveBucket((angles[s] + angles[s + 1]) / 2.0);
+
+    void emit(int start, int endNode, int bucket) {
       result.add(Polyline(
-        points: [pts[i], pts[i + 1]],
-        color: _curveColor(angle),
-        strokeWidth: _curveWidth(angle, road.twistinessScore),
+        points: pts.sublist(start, endNode + 1),
+        color: _bucketColors[bucket],
+        strokeWidth: _bucketWidth(bucket, road.twistinessScore),
         strokeCap: StrokeCap.round,
       ));
     }
+
+    int runStart = 0;
+    int runBucket = bucketAt(0);
+    for (int s = 1; s < nSeg; s++) {
+      final b = bucketAt(s);
+      if (b != runBucket) {
+        emit(runStart, s, runBucket); // run covers segs runStart..s-1 → nodes ..s
+        runStart = s;
+        runBucket = b;
+      }
+    }
+    emit(runStart, nSeg, runBucket);
   }
   return result;
+}
+
+/// Decoded roads plus their prebuilt polylines. Both lists hold only plain
+/// value types, so this can cross an isolate boundary (returned from compute()).
+class _ParsedRoads {
+  final List<Road> roads;
+  final List<Polyline> polylines;
+  const _ParsedRoads(this.roads, this.polylines);
+}
+
+/// Top-level so it can run in a background isolate via compute(): the JSON
+/// decode, feature mapping and (haversine-heavy) polyline build all happen off
+/// the UI thread, so a viewport refresh no longer janks the frame.
+_ParsedRoads _parseRoadsPayload(String body) {
+  final map = jsonDecode(body) as Map<String, dynamic>;
+  final roads = (map['features'] as List)
+      .map((f) => Road.fromFeature(f as Map<String, dynamic>))
+      .toList();
+  return _ParsedRoads(roads, _buildPolylines(roads));
+}
+
+// We fetch a region this much larger than the screen on each side, so panning
+// back and forth within the immediate area stays inside the loaded data.
+const _kFetchPad = 0.4;
+
+LatLngBounds _padBounds(LatLngBounds b, double frac) {
+  final dLat = (b.north - b.south) * frac;
+  final dLon = (b.east - b.west) * frac;
+  return LatLngBounds(
+    LatLng(b.south - dLat, b.west - dLon),
+    LatLng(b.north + dLat, b.east + dLon),
+  );
 }
 
 class MapScreen extends ConsumerStatefulWidget {
@@ -111,7 +171,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   List<Road> _roads = [];
   List<Polyline> _polylines = [];
   bool _fetching = false;
+  bool _pendingFetch = false; // a fetch was requested while one was in flight
   Timer? _debounce;
+
+  // Region currently loaded (padded beyond the screen) and the filters it was
+  // loaded with. While the viewport stays inside this and filters are unchanged,
+  // we skip refetching so panning back and forth doesn't reload / pop roads in.
+  LatLngBounds? _loadedBounds;
+  double? _loadedTwistiness;
+  bool? _loadedPavedOnly;
   double _currentZoom = _kDefaultZoom;
 
   bool _planMode = false;
@@ -141,39 +209,72 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   Future<void> _fetchRoads() async {
     final camera = _mapController.camera;
-    if (camera.zoom < kMinFetchZoom) {
-      if (_roads.isNotEmpty) {
-        setState(() { _roads = []; _polylines = []; });
-      }
-      return;
-    }
-
-    if (_fetching) return;
-    setState(() => _fetching = true);
-
-    final bounds = camera.visibleBounds;
     final minTwistiness = ref.read(filterProvider);
     final pavedOnly = ref.read(pavedOnlyProvider);
 
+    // Higher filter → we can fetch from farther out (fewer, more elite roads).
+    if (camera.zoom < minFetchZoomFor(minTwistiness)) {
+      if (_roads.isNotEmpty) {
+        setState(() { _roads = []; _polylines = []; });
+      }
+      _loadedBounds = null; // force a refetch when we zoom back in
+      return;
+    }
+
+    final visible = camera.visibleBounds;
+
+    // The current view is already covered by loaded data with the same filters
+    // (we load a padded region) → leave the drawn roads in place, no refetch.
+    if (_loadedBounds != null &&
+        minTwistiness == _loadedTwistiness &&
+        pavedOnly == _loadedPavedOnly &&
+        _loadedBounds!.containsBounds(visible)) {
+      return;
+    }
+
+    // A fetch is already running: remember that the viewport moved again and
+    // refetch once it finishes, so the final position isn't dropped.
+    if (_fetching) {
+      _pendingFetch = true;
+      return;
+    }
+    setState(() => _fetching = true);
+
+    final fetchBounds = _padBounds(visible, _kFetchPad);
+
     try {
-      final roads = await ApiService.fetchRoads(
-        minLat: bounds.south,
-        minLon: bounds.west,
-        maxLat: bounds.north,
-        maxLon: bounds.east,
+      final body = await ApiService.fetchRoadsBody(
+        minLat: fetchBounds.south,
+        minLon: fetchBounds.west,
+        maxLat: fetchBounds.north,
+        maxLon: fetchBounds.east,
         minTwistiness: minTwistiness,
         includeUnpaved: !pavedOnly,
       );
+      // Decode + build polylines off the UI isolate so the frame doesn't jank.
+      final parsed = await compute(_parseRoadsPayload, body);
       if (mounted) {
         setState(() {
-          _roads = roads;
-          _polylines = _buildPolylines(roads);
+          _roads = parsed.roads;
+          _polylines = parsed.polylines;
         });
+        // Remember what we now have loaded so we can skip redundant refetches.
+        _loadedBounds = fetchBounds;
+        _loadedTwistiness = minTwistiness;
+        _loadedPavedOnly = pavedOnly;
       }
     } catch (_) {
       // silent fail — roads stay as-is
     } finally {
-      if (mounted) setState(() => _fetching = false);
+      if (mounted) {
+        setState(() => _fetching = false);
+        if (_pendingFetch) {
+          _pendingFetch = false;
+          _fetchRoads(); // catch up to the latest camera/filters
+        }
+      } else {
+        _fetching = false;
+      }
     }
   }
 
@@ -358,9 +459,49 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     _mapController.move(LatLng(pos.latitude, pos.longitude), 13.0);
   }
 
+  void _chooseBasemap() {
+    final current = ref.read(basemapProvider);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF161B22),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('BASEMAP',
+                    style: TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.2)),
+              ),
+            ),
+            for (int i = 0; i < kBasemaps.length; i++)
+              ListTile(
+                title: Text(kBasemaps[i].name,
+                    style: const TextStyle(color: Colors.white)),
+                trailing: i == current
+                    ? const Icon(Icons.check, color: Color(0xFF00FF87))
+                    : null,
+                onTap: () {
+                  ref.read(basemapProvider.notifier).state = i;
+                  Navigator.pop(context);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final minTwistiness = ref.watch(filterProvider);
+    final basemap = kBasemaps[ref.watch(basemapProvider)];
     final zoom = _currentZoom;
 
     return Scaffold(
@@ -380,11 +521,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             ),
             children: [
               TileLayer(
-                urlTemplate:
-                    'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
-                subdomains: const ['a', 'b', 'c', 'd'],
+                key: ValueKey(basemap.urlTemplate),
+                urlTemplate: basemap.urlTemplate,
+                subdomains: basemap.subdomains,
                 userAgentPackageName: 'com.thebends.app',
-                maxZoom: 19,
+                maxZoom: basemap.maxZoom.toDouble(),
               ),
               if (_polylines.isNotEmpty)
                 PolylineLayer(polylines: _polylines),
@@ -411,10 +552,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       ),
                   ],
                 ),
-              const RichAttributionWidget(
+              RichAttributionWidget(
                 attributions: [
-                  TextSourceAttribution('OpenStreetMap contributors'),
-                  TextSourceAttribution('CARTO'),
+                  for (final a in basemap.attributions)
+                    TextSourceAttribution(a),
                 ],
               ),
             ],
@@ -434,7 +575,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             ),
           ),
 
-          if (zoom < kMinFetchZoom)
+          if (zoom < minFetchZoomFor(minTwistiness))
             Center(
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -487,6 +628,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               bottom: 120,
               child: Column(
                 children: [
+                  FloatingActionButton.small(
+                    heroTag: 'basemap',
+                    onPressed: _chooseBasemap,
+                    child: const Icon(Icons.layers),
+                  ),
+                  const SizedBox(height: 12),
                   FloatingActionButton(
                     heroTag: 'plan',
                     onPressed: _togglePlanMode,

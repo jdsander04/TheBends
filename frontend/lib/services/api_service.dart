@@ -6,7 +6,10 @@ import '../models/road.dart';
 class ApiService {
   static final _client = http.Client();
 
-  static Future<List<Road>> fetchRoads({
+  /// Raw GeoJSON body for the map viewport. Decoding + polyline building is the
+  /// expensive part, so we hand the unparsed body to the caller to run off the
+  /// UI isolate (via compute()) rather than decoding here on the main thread.
+  static Future<String> fetchRoadsBody({
     required double minLat,
     required double minLon,
     required double maxLat,
@@ -31,11 +34,7 @@ class ApiService {
     if (response.statusCode != 200) {
       throw Exception('API ${response.statusCode}');
     }
-
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
-    return (body['features'] as List)
-        .map((f) => Road.fromFeature(f as Map<String, dynamic>))
-        .toList();
+    return response.body;
   }
 
   /// Full detail for one road, including the elevation profile.

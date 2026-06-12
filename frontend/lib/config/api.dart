@@ -7,6 +7,15 @@ const String kApiBase = String.fromEnvironment(
   defaultValue: 'http://localhost:8000',
 );
 
-// Minimum map zoom level before we bother fetching roads.
-// Below this the bounding box is too large to be useful.
-const double kMinFetchZoom = 10.0;
+// Minimum map zoom before we bother fetching roads — below this the bounding
+// box is too large. The floor eases down as the min-twistiness filter rises:
+// with a strict filter only a handful of elite roads remain, so they're cheap
+// and genuinely useful to render from a much wider, more zoomed-out view.
+//   twistiness <= 0.3  -> zoom 10   (lots of roads; keep the view tight)
+//   twistiness == 1.0  -> zoom 6    (only the best; show them region-wide)
+double minFetchZoomFor(double minTwistiness) {
+  const lowT = 0.3, highT = 1.0;
+  const floorAtLow = 10.0, floorAtHigh = 6.0;
+  final t = ((minTwistiness - lowT) / (highT - lowT)).clamp(0.0, 1.0);
+  return floorAtLow + (floorAtHigh - floorAtLow) * t;
+}

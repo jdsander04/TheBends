@@ -49,7 +49,7 @@ def get_roads_by_bounds(
         filters.append("(access IS NULL OR access NOT IN ('private', 'no'))")
 
     sql = f"""
-        SELECT {_SUMMARY_COLS}, ST_AsGeoJSON(geom)::json AS geometry
+        SELECT {_SUMMARY_COLS}, ST_AsGeoJSON(geom, 6)::json AS geometry
         FROM osm_roads
         WHERE {' AND '.join(filters)}
         ORDER BY twistiness_score DESC
@@ -83,7 +83,7 @@ def get_road(road_id: int):
             SELECT {_SUMMARY_COLS}, access, elev_min, elev_max, elev_loss,
                    elev_profile,
                    ST_Length(geom::geography) AS length_m,
-                   ST_AsGeoJSON(geom)::json AS geometry
+                   ST_AsGeoJSON(geom, 6)::json AS geometry
             FROM osm_roads WHERE id = %s
             """,
             (road_id,),
@@ -111,7 +111,7 @@ def get_road_gpx(road_id: int):
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT name, ST_AsGeoJSON(geom)::json AS geometry "
+            "SELECT name, ST_AsGeoJSON(geom, 6)::json AS geometry "
             "FROM osm_roads WHERE id = %s",
             (road_id,),
         )
@@ -134,7 +134,7 @@ def get_popular_routes(limit: int = Query(20, ge=1, le=100)):
         cur.execute(
             f"""
             SELECT {_SUMMARY_COLS},
-                   ST_AsGeoJSON(geom)::json AS geometry,
+                   ST_AsGeoJSON(geom, 6)::json AS geometry,
                    ST_Length(geom::geography) AS length_m
             FROM osm_roads
             WHERE name IS NOT NULL AND name != ''
